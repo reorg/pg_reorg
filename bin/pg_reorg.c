@@ -430,6 +430,24 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 					PQgetvalue(res, 0, 0), table->target_name)));
 	PQclear(res);
 
+	/* Try to stop an admin from running TRUNCATE on the target table
+	 * while pg_reorg is running, since doing so is not safe; the
+	 * truncated rows would be restored after pg_reorg finishes the
+	 * table swap step. 
+	 *
+	 * Only PG versions 9.1 support TRUNCATE triggers, and there's not
+	 * much we can do about this hazard with earlier PG versions.
+	 */
+	if (PQserverVersion(connection) >= 90100)
+	{
+		printfStringInfo(&sql,
+				 "CREATE TRIGGER z_reorg_forbid_truncate "
+				 "BEFORE TRUNCATE ON %s FOR EACH STATEMENT "
+				 "EXECUTE PROCEDURE reorg.forbid_truncate()",
+				 table->target_name);
+	}
+	command(sql.data, 0, NULL);
+
 	command(table->create_pktype, 0, NULL);
 	command(table->create_log, 0, NULL);
 	command(table->create_trigger, 0, NULL);

@@ -783,6 +783,14 @@ reorg_swap(PG_FUNCTION_ARGS)
 		"DROP TRIGGER IF EXISTS z_reorg_trigger ON %s.%s CASCADE",
 		nspname, relname);
 
+	/* Note, this trigger will not exist if working against 9.0 or earlier,
+	 * but that's what IF EXISTS is for.
+	 */
+	execute_with_format(
+	    SPI_OK_UTILITY,
+	    "DROP TRIGGER IF EXISTS z_reorg_forbid_truncate ON %s.%s CASCADE",
+	    nspname, relname);
+
 	SPI_finish();
 
 	PG_RETURN_VOID();
@@ -811,13 +819,19 @@ reorg_drop(PG_FUNCTION_ARGS)
 	reorg_init();
 
 	/*
-	 * drop reorg trigger: We have already dropped the trigger in normal
-	 * cases, but it can be left on error.
+	 * drop reorg triggers: We have already dropped the triggers in normal
+	 * cases, but they can be left on error.
 	 */
 	execute_with_format(
 		SPI_OK_UTILITY,
 		"DROP TRIGGER IF EXISTS z_reorg_trigger ON %s.%s CASCADE",
 		nspname, relname);
+
+	execute_with_format(
+		SPI_OK_UTILITY,
+		"DROP TRIGGER IF EXISTS z_reorg_forbid_truncate ON %s.%s CASCADE",
+		nspname, relname);
+
 
 #if PG_VERSION_NUM < 80400
 	/* delete autovacuum settings */
