@@ -445,8 +445,9 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 				 "BEFORE TRUNCATE ON %s FOR EACH STATEMENT "
 				 "EXECUTE PROCEDURE reorg.forbid_truncate()",
 				 table->target_name);
+		command(sql.data, 0, NULL);
 	}
-	command(sql.data, 0, NULL);
+
 
 	command(table->create_pktype, 0, NULL);
 	command(table->create_log, 0, NULL);
