@@ -905,6 +905,9 @@ Datum
 reorg_forbid_truncate(PG_FUNCTION_ARGS)
 {
 	elog(ERROR, "TRUNCATE disallowed on source table while pg_reorg running.");
+
+	/* avoid compiler warning about reaching end of non-void function */
+	PG_RETURN_NULL();
 }
 
 /* init SPI */
