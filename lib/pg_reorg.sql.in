@@ -78,12 +78,9 @@ $$
 $$
 LANGUAGE sql STABLE STRICT;
 
-CREATE FUNCTION reorg.forbid_truncate() RETURNS trigger AS
-$$
-  BEGIN
-    RAISE EXCEPTION 'Truncate on table not allowed while pg_reorg is running.';
-  END;
-$$ LANGUAGE plpgsql VOLATILE;
+CREATE FUNCTION reorg.reorg_forbid_truncate() RETURNS trigger AS
+'MODULE_PATHNAME', 'reorg_forbid_truncate'
+LANGUAGE C VOLATILE STRICT SECURITY DEFINER;
 
 
 CREATE FUNCTION reorg.get_assign(oid, text) RETURNS text AS

@@ -45,6 +45,7 @@ extern Datum PGUT_EXPORT reorg_indexdef(PG_FUNCTION_ARGS);
 extern Datum PGUT_EXPORT reorg_swap(PG_FUNCTION_ARGS);
 extern Datum PGUT_EXPORT reorg_drop(PG_FUNCTION_ARGS);
 extern Datum PGUT_EXPORT reorg_disable_autovacuum(PG_FUNCTION_ARGS);
+extern Datum PGUT_EXPORT reorg_forbid_truncate(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(reorg_version);
 PG_FUNCTION_INFO_V1(reorg_trigger);
@@ -54,6 +55,7 @@ PG_FUNCTION_INFO_V1(reorg_indexdef);
 PG_FUNCTION_INFO_V1(reorg_swap);
 PG_FUNCTION_INFO_V1(reorg_drop);
 PG_FUNCTION_INFO_V1(reorg_disable_autovacuum);
+PG_FUNCTION_INFO_V1(reorg_forbid_truncate);
 
 static void	reorg_init(void);
 static SPIPlanPtr reorg_prepare(const char *src, int nargs, Oid *argtypes);
@@ -892,6 +894,17 @@ reorg_disable_autovacuum(PG_FUNCTION_ARGS)
 	SPI_finish();
 
 	PG_RETURN_VOID();
+}
+
+
+/* This function should only be called as an ON TRUNCATE trigger; obviously
+ * for PG versions < 9.1 we can not set up this function as an
+ * ON TRUNCATE trigger.
+ */
+Datum
+reorg_forbid_truncate(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "TRUNCATE disallowed on source table while pg_reorg running.");
 }
 
 /* init SPI */

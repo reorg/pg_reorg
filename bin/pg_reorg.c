@@ -443,7 +443,7 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 		printfStringInfo(&sql,
 				 "CREATE TRIGGER z_reorg_forbid_truncate "
 				 "BEFORE TRUNCATE ON %s FOR EACH STATEMENT "
-				 "EXECUTE PROCEDURE reorg.forbid_truncate()",
+				 "EXECUTE PROCEDURE reorg.reorg_forbid_truncate()",
 				 table->target_name);
 		command(sql.data, 0, NULL);
 	}
