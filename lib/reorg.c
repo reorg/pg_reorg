@@ -779,19 +779,19 @@ reorg_swap(PG_FUNCTION_ARGS)
 		CommandCounterIncrement();
 	}
 
-	/* drop reorg trigger */
+	/* drop main reorg trigger */
 	execute_with_format(
 		SPI_OK_UTILITY,
 		"DROP TRIGGER IF EXISTS z_reorg_trigger ON %s.%s CASCADE",
 		nspname, relname);
 
-	/* Note, this trigger will not exist if working against 9.0 or earlier,
-	 * but that's what IF EXISTS is for.
-	 */
+#if PG_VERSION_NUM >= 90100
+	/* For PG 9.1+, remove trigger blocking concurrent TRUNCATE. */
 	execute_with_format(
-	    SPI_OK_UTILITY,
-	    "DROP TRIGGER IF EXISTS z_reorg_forbid_truncate ON %s.%s CASCADE",
-	    nspname, relname);
+		SPI_OK_UTILITY,
+		"DROP TRIGGER IF EXISTS z_reorg_forbid_truncate ON %s.%s CASCADE",
+		nspname, relname);
+#endif
 
 	SPI_finish();
 
@@ -829,11 +829,12 @@ reorg_drop(PG_FUNCTION_ARGS)
 		"DROP TRIGGER IF EXISTS z_reorg_trigger ON %s.%s CASCADE",
 		nspname, relname);
 
+#if PG_VERSION_NUM >= 90100
 	execute_with_format(
 		SPI_OK_UTILITY,
 		"DROP TRIGGER IF EXISTS z_reorg_forbid_truncate ON %s.%s CASCADE",
 		nspname, relname);
-
+#endif
 
 #if PG_VERSION_NUM < 80400
 	/* delete autovacuum settings */
@@ -896,7 +897,6 @@ reorg_disable_autovacuum(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-
 /* This function should only be called as an ON TRUNCATE trigger; obviously
  * for PG versions < 9.1 we can not set up this function as an
  * ON TRUNCATE trigger.
@@ -904,7 +904,22 @@ reorg_disable_autovacuum(PG_FUNCTION_ARGS)
 Datum
 reorg_forbid_truncate(PG_FUNCTION_ARGS)
 {
-	elog(ERROR, "TRUNCATE disallowed on source table while pg_reorg running.");
+	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
+	Relation       rel;
+
+	/* Sanity check to make sure trigger was set up correctly */
+	if (!CALLED_AS_TRIGGER(fcinfo) ||
+		!TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
+		elog(ERROR, "reorg_forbid_truncate: should be called only as "
+			 "an ON TRUNCATE trigger");
+
+	/* It might be helpful for the error message to explain which relation
+	 * is forbidden to TRUNCATE, e.g. when using TRUNCATE ... CASCADE
+	 */
+	rel = trigdata->tg_relation;
+
+	elog(ERROR, "reorg_forbid_truncate: TRUNCATE forbidden on source "
+		 "table \"%s\" while pg_reorg is running", SPI_getrelname(rel));
 
 	/* avoid compiler warning about reaching end of non-void function */
 	PG_RETURN_NULL();

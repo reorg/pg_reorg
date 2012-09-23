@@ -82,7 +82,6 @@ CREATE FUNCTION reorg.reorg_forbid_truncate() RETURNS trigger AS
 'MODULE_PATHNAME', 'reorg_forbid_truncate'
 LANGUAGE C VOLATILE STRICT SECURITY DEFINER;
 
-
 CREATE FUNCTION reorg.get_assign(oid, text) RETURNS text AS
 $$
   SELECT '(' || array_to_string(reorg.array_accum(quote_ident(attname)), ', ') ||
