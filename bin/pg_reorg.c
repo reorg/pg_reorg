@@ -95,15 +95,15 @@ typedef struct reorg_index
 } reorg_index;
 
 static void reorg_all_databases(const char *order_by);
-static bool reorg_one_database(const char *order_by, const char *table);
+static bool reorg_one_database(const char *order_by);
 static void reorg_one_table(const reorg_table *table, const char *order_by);
-static void reorg_cleanup(bool fatal, void *userdata);
+static void reorg_cleanup(bool fatal, const reorg_table *table);
 
 static char *getstr(PGresult *res, int row, int col);
 static Oid getoid(PGresult *res, int row, int col);
-static void lock_exclusive(PGconn *conn, const char *relid, const char *lock_query, bool start_xact);
+static bool lock_exclusive(PGconn *conn, const char *relid, const char *lock_query, bool start_xact);
 static bool kill_ddl(PGconn *conn, Oid relid, bool terminate);
-static void lock_access_share(PGconn *conn, Oid relid, const char *target_name);
+static bool lock_access_share(PGconn *conn, Oid relid, const char *target_name);
 
 #define SQLSTATE_INVALID_SCHEMA_NAME	"3F000"
 #define SQLSTATE_QUERY_CANCELED			"57014"
@@ -143,7 +143,6 @@ int
 main(int argc, char *argv[])
 {
 	int						i;
-	SimpleStringListCell	*cell;
 
 	i = pgut_getopt(argc, argv, options);
 
@@ -159,22 +158,15 @@ main(int argc, char *argv[])
 
 	if (alldb)
 	{
-		if (table_list.head != NULL)
+		if (table_list.head)
 			ereport(ERROR,
 				(errcode(EINVAL),
-				 errmsg("cannot reorg a specific table in all databases")));
+				 errmsg("cannot reorg specific table(s) in all databases")));
 		reorg_all_databases(orderby);
 	}
 	else
 	{
-		if (table_list.head != NULL)
-		{
-			for (cell = table_list.head; cell; cell = cell->next)
-			{
-				reorg_one_database(orderby, cell->val);
-			}
-		}
-		else if (!reorg_one_database(orderby, NULL))
+		if (!reorg_one_database(orderby))
 			ereport(ERROR,
 					(errcode(ENOENT),
 					 errmsg("%s is not installed", PROGRAM_NAME)));
@@ -209,7 +201,7 @@ reorg_all_databases(const char *orderby)
 			fflush(stdout);
 		}
 
-		ret = reorg_one_database(orderby, NULL);
+		ret = reorg_one_database(orderby);
 
 		if (pgut_log_level >= INFO)
 		{
@@ -247,13 +239,14 @@ getoid(PGresult *res, int row, int col)
  * Call reorg_one_table for the target table or each table in a database.
  */
 static bool
-reorg_one_database(const char *orderby, const char *table)
+reorg_one_database(const char *orderby)
 {
-	bool			ret = true;
-	PGresult	   *res;
-	int				i;
-	int				num;
-	StringInfoData	sql;
+	bool					ret = true;
+	PGresult	   		   *res;
+	int						i;
+	int						num;
+	StringInfoData			sql;
+	SimpleStringListCell   *cell;
 
 	initStringInfo(&sql);
 
@@ -270,10 +263,18 @@ reorg_one_database(const char *orderby, const char *table)
 
 	/* acquire target tables */
 	appendStringInfoString(&sql, "SELECT * FROM reorg.tables WHERE ");
-	if (table)
+	if (table_list.head)
 	{
-		appendStringInfoString(&sql, "relid = $1::regclass");
-		res = execute_elevel(sql.data, 1, &table, DEBUG2);
+		appendStringInfoString(&sql, "( ");
+		for (cell = table_list.head; cell; cell = cell->next)
+		{
+			/* FIXME: bogus table quoting */
+			appendStringInfo(&sql, "relid = '%s'::regclass", cell->val);
+			if (cell->next)
+				appendStringInfoString(&sql, " OR ");
+		}
+		appendStringInfoString(&sql, " )");
+		res = execute_elevel(sql.data, 0, NULL, DEBUG2);
 	}
 	else
 	{
@@ -288,6 +289,7 @@ reorg_one_database(const char *orderby, const char *table)
 		if (sqlstate_equals(res, SQLSTATE_INVALID_SCHEMA_NAME))
 		{
 			/* Schema reorg does not exist. Skip the database. */
+			PQclear(res);
 			ret = false;
 			goto cleanup;
 		}
@@ -337,9 +339,12 @@ reorg_one_database(const char *orderby, const char *table)
 		{
 			/* CLUSTER mode */
 			if (ckey == NULL)
-				ereport(ERROR,
+			{
+				ereport(WARNING,
 					(errcode(E_PG_COMMAND),
 					 errmsg("relation \"%s\" has no cluster key", table.target_name)));
+				continue;
+			}
 			appendStringInfo(&sql, "%s ORDER BY %s", create_table, ckey);
             table.create_table = sql.data;
 		}
@@ -406,12 +411,13 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 	int				num;
 	int				i;
 	int				num_waiting = 0;
-	char		   *vxid;
-	char		   *lock_conn_pid;
+	char		   *vxid = NULL;
 	char			buffer[12];
 	StringInfoData	sql;
+	bool            have_error = false;
 
 	initStringInfo(&sql);
+	printf("Reorg table: %s\n", table->target_name);
 
 	elog(DEBUG2, "---- reorg_one_table ----");
 	elog(DEBUG2, "target_name    : %s", table->target_name);
@@ -438,7 +444,12 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 	 * 1. Setup workspaces and a trigger.
 	 */
 	elog(DEBUG2, "---- setup ----");
-	lock_exclusive(connection, utoa(table->target_oid, buffer), table->lock_table, TRUE);
+	if (!(lock_exclusive(connection, utoa(table->target_oid, buffer), table->lock_table, TRUE)))
+	{
+		elog(WARNING, "lock_exclusive() failed for %s", table->target_name);
+		have_error = true;
+		goto cleanup;
+	}
 
 	/*
 	 * Check z_reorg_trigger is the trigger executed at last so that
@@ -448,10 +459,15 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 
 	res = execute("SELECT reorg.conflicted_triggers($1)", 1, params);
 	if (PQntuples(res) > 0)
-		ereport(ERROR,
+	{
+		ereport(WARNING,
 			(errcode(E_PG_COMMAND),
 			 errmsg("trigger %s conflicted for %s",
 					PQgetvalue(res, 0, 0), table->target_name)));
+		PQclear(res);
+		have_error = true;
+		goto cleanup;
+	}
 	PQclear(res);
 
 	command(table->create_pktype, 0, NULL);
@@ -466,7 +482,6 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 	 * We want to submit this query in conn2 while connection's
 	 * transaction still holds its lock, so that no DDL may sneak in
 	 * between the time that connection commits and conn2 gets its lock.
-	 *
 	 */
 	pgut_command(conn2, "BEGIN ISOLATION LEVEL READ COMMITTED", 0, NULL);
 
@@ -478,9 +493,11 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 	{
 		printf("%s", PQerrorMessage(conn2));
 		PQclear(res);
-		exit(1);
+		have_error = true;
+		goto cleanup;
 	}
-	lock_conn_pid = strdup(PQgetvalue(res, 0, 0));
+	buffer[0] = '\0';
+	strncat(buffer, PQgetvalue(res, 0, 0), sizeof(buffer) - 1);
 	PQclear(res);
 
 	/*
@@ -492,9 +509,10 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 					 table->target_name);
 	elog(DEBUG2, "LOCK TABLE %s IN ACCESS SHARE MODE", table->target_name);
 	if (!(PQsendQuery(conn2, sql.data))) {
-		printf("Error sending async query: %s\n%s", sql.data, PQerrorMessage(conn2));
-		/* XXX: better error handling */
-		exit(1);
+		elog(WARNING, "Error sending async query: %s\n%s", sql.data,
+			 PQerrorMessage(conn2));
+		have_error = true;
+		goto cleanup;
 	}
 
 	/* Now that we've submitted the LOCK TABLE request through conn2,
@@ -509,9 +527,10 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 	 */
 	if (!(kill_ddl(connection, table->target_oid, true)))
 	{
-		exit(1);
+		elog(WARNING, "kill_ddl() failed.");
+		have_error = true;
+		goto cleanup;
 	}
-
 
 	/* We're finished killing off any unsafe DDL. COMMIT in our main
 	 * connection, so that conn2 may get its AccessShare lock.
@@ -528,18 +547,11 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 		{
 			printf("Error with LOCK TABLE: %s", PQerrorMessage(conn2));
 			PQclear(res);
-			exit(1);
+			have_error = true;
+			goto cleanup;
 		}
 		PQclear(res);
 	}
-
-
-	/*
-	 * Register the table to be dropped on error. We use pktype as
-	 * an advisory lock. The registration should be done after
-	 * the first command succeeds.
-	 */
-	pgut_atexit_push(&reorg_cleanup, (void *) table);
 
 	/*
 	 * 2. Copy tuples into temp table.
@@ -554,9 +566,16 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 
 	/* Fetch an array of Virtual IDs of all transactions active right now.
 	 */
-	params[0] = lock_conn_pid;
+	params[0] = buffer;
 	res = execute(SQL_XID_SNAPSHOT, 1, params);
-	vxid = strdup(PQgetvalue(res, 0, 0));
+	if (!(vxid = strdup(PQgetvalue(res, 0, 0))))
+	{
+		elog(WARNING, "Unable to allocate vxid, length: %d\n",
+			 PQgetlength(res, 0, 0));
+		PQclear(res);
+		have_error = true;
+		goto cleanup;
+	}
 	PQclear(res);
 
 	command(table->delete_log, 0, NULL);
@@ -573,7 +592,11 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 	 * CREATE TABLE ... AS SELECT does not deadlock waiting for an
 	 * AccessShare lock.
 	 */
-	lock_access_share(connection, table->target_oid, table->target_name);
+	if (!(lock_access_share(connection, table->target_oid, table->target_name)))
+	{
+		have_error = true;
+		goto cleanup;
+	}
 
 	command(table->create_table, 0, NULL);
 	printfStringInfo(&sql, "SELECT reorg.disable_autovacuum('reorg.table_%u')", table->target_oid);
@@ -672,8 +695,16 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 	 */
 	elog(DEBUG2, "---- swap ----");
 	/* Bump our existing AccessShare lock to AccessExclusive */
-	lock_exclusive(conn2, utoa(table->target_oid, buffer), table->lock_table,
-				   FALSE);
+
+	if (!(lock_exclusive(conn2, utoa(table->target_oid, buffer),
+						 table->lock_table, FALSE)))
+	{
+		elog(WARNING, "lock_exclusive() failed in conn2 for %s",
+			 table->target_name);
+		have_error = true;
+		goto cleanup;
+	}
+
 	apply_log(conn2, table, 0);
 	params[0] = utoa(table->target_oid, buffer);
 	pgut_command(conn2, "SELECT reorg.reorg_swap($1)", 1, params);
@@ -688,10 +719,6 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 	params[0] = utoa(table->target_oid, buffer);
 	command("SELECT reorg.reorg_drop($1)", 1, params);
 	command("COMMIT", 0, NULL);
-
-	pgut_atexit_pop(&reorg_cleanup, (void *) table);
-	free(vxid);
-	free(lock_conn_pid);
 
 	/*
 	 * 7. Analyze.
@@ -708,7 +735,16 @@ reorg_one_table(const reorg_table *table, const char *orderby)
 		command("COMMIT", 0, NULL);
 	}
 
+cleanup:
 	termStringInfo(&sql);
+	if (vxid)
+		free(vxid);
+
+	/* XXX: distinguish between fatal and non-fatal errors via the first
+	 * arg to reorg_cleanup().
+	 */
+	if (have_error)
+		reorg_cleanup(false, table);
 }
 
 /* Kill off any concurrent DDL (or any transaction attempting to take
@@ -731,19 +767,23 @@ kill_ddl(PGconn *conn, Oid relid, bool terminate)
 	res = pgut_execute(conn, sql.data, 0, NULL);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		printf("Error canceling unsafe queries: %s", PQerrorMessage(conn));
+		elog(WARNING, "Error canceling unsafe queries: %s",
+			 PQerrorMessage(conn));
 		ret = false;
 	}
 	else if (PQntuples(res) > 0 && terminate && PQserverVersion(conn) >= 80400)
 	{
-		elog(WARNING, "Canceled %d unsafe queries. Terminating any remaining PIDs.", PQntuples(res));
+		elog(WARNING,
+			 "Canceled %d unsafe queries. Terminating any remaining PIDs.",
+			 PQntuples(res));
 
 		PQclear(res);
 		printfStringInfo(&sql, KILL_COMPETING_LOCKS, relid);
 		res = pgut_execute(conn, sql.data, 0, NULL);
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		{
-			printf("Error killing unsafe queries: %s", PQerrorMessage(conn));
+			elog(WARNING, "Error killing unsafe queries: %s",
+				 PQerrorMessage(conn));
 			ret = false;
 		}
 	}
@@ -751,7 +791,6 @@ kill_ddl(PGconn *conn, Oid relid, bool terminate)
 		elog(NOTICE, "Canceled %d unsafe queries", PQntuples(res));
 	else
 		elog(DEBUG2, "No competing DDL to cancel.");
-
 
 	PQclear(res);
 	termStringInfo(&sql);
@@ -771,12 +810,13 @@ kill_ddl(PGconn *conn, Oid relid, bool terminate)
  *  relid: OID of relation
  *  target_name: name of table
  */
-static void
+static bool
 lock_access_share(PGconn *conn, Oid relid, const char *target_name)
 {
 	StringInfoData	sql;
 	time_t			start = time(NULL);
 	int				i;
+	bool			ret = true;
 
 	initStringInfo(&sql);
 
@@ -796,9 +836,12 @@ lock_access_share(PGconn *conn, Oid relid, const char *target_name)
 		 * already.
 		 */
 		if (duration > (wait_timeout * 2))
-			kill_ddl(conn, relid, true);
+			ret = kill_ddl(conn, relid, true);
 		else
-			kill_ddl(conn, relid, false);
+			ret = kill_ddl(conn, relid, false);
+
+		if (!ret)
+			break;
 
 		/* wait for a while to lock the table. */
 		wait_msec = Min(1000, i * 100);
@@ -825,14 +868,16 @@ lock_access_share(PGconn *conn, Oid relid, const char *target_name)
 		else
 		{
 			/* exit otherwise */
-			printf("%s", PQerrorMessage(connection));
+			elog(WARNING, "%s", PQerrorMessage(connection));
 			PQclear(res);
-			exit(1);
+			ret = false;
+			break;
 		}
 	}
 
 	termStringInfo(&sql);
 	pgut_command(conn, "RESET statement_timeout", 0, NULL);
+	return ret;
 }
 
 
@@ -846,11 +891,12 @@ lock_access_share(PGconn *conn, Oid relid, const char *target_name)
  *  lock_query: LOCK TABLE ... IN ACCESS EXCLUSIVE query to be executed
  *  start_xact: whether we need to issue a BEGIN;
  */
-static void
+static bool
 lock_exclusive(PGconn *conn, const char *relid, const char *lock_query, bool start_xact)
 {
 	time_t		start = time(NULL);
 	int			i;
+	bool		ret = true;
 
 	for (i = 1; ; i++)
 	{
@@ -913,11 +959,13 @@ lock_exclusive(PGconn *conn, const char *relid, const char *lock_query, bool sta
 			/* exit otherwise */
 			printf("%s", PQerrorMessage(connection));
 			PQclear(res);
-			exit(1);
+			ret = false;
+			break;
 		}
 	}
 
 	pgut_command(conn, "RESET statement_timeout", 0, NULL);
+	return ret;
 }
 
 /*
@@ -925,10 +973,8 @@ lock_exclusive(PGconn *conn, const char *relid, const char *lock_query, bool sta
  * objects before the program exits.
  */
 static void
-reorg_cleanup(bool fatal, void *userdata)
+reorg_cleanup(bool fatal, const reorg_table *table)
 {
-	const reorg_table *table = (const reorg_table *) userdata;
-
 	if (fatal)
 	{
 		fprintf(stderr, "!!!FATAL ERROR!!! Please refer to the manual.\n\n");
@@ -938,15 +984,13 @@ reorg_cleanup(bool fatal, void *userdata)
 		char		buffer[12];
 		const char *params[1];
 
-		/* Rollback current transaction */
-		if (conn2)
-			pgut_command(conn2, "ROLLBACK", 0, NULL);
-
-		if (connection)
-			command("ROLLBACK", 0, NULL);
+		/* Rollback current transactions */
+		pgut_rollback(connection);
+		pgut_rollback(conn2);
 
 		/* Try reconnection if not available. */
-		if (PQstatus(connection) != CONNECTION_OK)
+		if (PQstatus(connection) != CONNECTION_OK ||
+			PQstatus(conn2) != CONNECTION_OK)
 			reconnect(ERROR);
 
 		/* do cleanup */
