@@ -319,7 +319,7 @@ reorg_one_database(const char *orderby)
 		else
 		{
 			/* exit otherwise */
-			printf("%s", PQerrorMessage(connection));
+			elog(ERROR, "%s", PQerrorMessage(connection));
 			PQclear(res);
 			exit(1);
 		}
@@ -880,12 +880,9 @@ lock_access_share(PGconn *conn, Oid relid, const char *target_name)
 		}
 		else if (sqlstate_equals(res, SQLSTATE_QUERY_CANCELED))
 		{
-			/* XXX: does this ROLLBACK need any rethinking wrt. two connections
-			 * now? 
-			 */
 			/* retry if lock conflicted */
 			PQclear(res);
-			pgut_command(conn, "ROLLBACK", 0, NULL);
+			pgut_rollback(conn);
 			continue;
 		}
 		else
@@ -969,12 +966,9 @@ lock_exclusive(PGconn *conn, const char *relid, const char *lock_query, bool sta
 		}
 		else if (sqlstate_equals(res, SQLSTATE_QUERY_CANCELED))
 		{
-			/* XXX: does this ROLLBACK need any rethinking wrt. two connections
-			 * now? 
-			 */
 			/* retry if lock conflicted */
 			PQclear(res);
-			pgut_command(conn, "ROLLBACK", 0, NULL);
+			pgut_rollback(conn);
 			continue;
 		}
 		else
