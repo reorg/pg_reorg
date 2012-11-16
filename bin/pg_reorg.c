@@ -95,7 +95,7 @@ typedef struct reorg_index
 } reorg_index;
 
 static void reorg_all_databases(const char *order_by);
-static bool reorg_one_database(const char *order_by);
+static bool reorg_one_database(const char *order_by, char *errbuf, size_t errsize);
 static void reorg_one_table(const reorg_table *table, const char *order_by);
 static void reorg_cleanup(bool fatal, const reorg_table *table);
 
@@ -166,10 +166,11 @@ main(int argc, char *argv[])
 	}
 	else
 	{
-		if (!reorg_one_database(orderby))
+		char errbuf[256];
+		if (!reorg_one_database(orderby, errbuf, sizeof(errbuf)))
 			ereport(ERROR,
-					(errcode(ENOENT),
-					 errmsg("%s is not installed", PROGRAM_NAME)));
+					(errcode(ERROR),
+					 errmsg("%s", errbuf)));
 	}
 
 	return 0;
@@ -192,23 +193,24 @@ reorg_all_databases(const char *orderby)
 	for (i = 0; i < PQntuples(result); i++)
 	{
 		bool	ret;
+		char	errbuf[256];
 
 		dbname = PQgetvalue(result, i, 0);
 
 		if (pgut_log_level >= INFO)
 		{
-			printf("%s: reorg database \"%s\"", PROGRAM_NAME, dbname);
+			printf("%s: reorg database \"%s\"\n", PROGRAM_NAME, dbname);
 			fflush(stdout);
 		}
 
-		ret = reorg_one_database(orderby);
+		ret = reorg_one_database(orderby, errbuf, sizeof(errbuf));
 
 		if (pgut_log_level >= INFO)
 		{
 			if (ret)
 				printf("\n");
 			else
-				printf(" ... skipped\n");
+				printf(" ... skipped: %s\n", errbuf);
 			fflush(stdout);
 		}
 	}
@@ -240,7 +242,7 @@ getoid(PGresult *res, int row, int col)
  * Call reorg_one_table for the target table or each table in a database.
  */
 static bool
-reorg_one_database(const char *orderby)
+reorg_one_database(const char *orderby, char *errbuf, size_t errsize)
 {
 	bool					ret = true;
 	PGresult	   		   *res;
@@ -291,22 +293,25 @@ reorg_one_database(const char *orderby)
 		res = execute_elevel(sql.data, 0, NULL, DEBUG2);
 	}
 
+	/* on error skip the database */
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
 		if (sqlstate_equals(res, SQLSTATE_INVALID_SCHEMA_NAME))
 		{
 			/* Schema reorg does not exist. Skip the database. */
-			PQclear(res);
-			ret = false;
-			goto cleanup;
+			if (errbuf)
+				snprintf(errbuf, errsize,
+						 "%s is not installed in the database", PROGRAM_NAME);
+
 		}
 		else
 		{
-			/* exit otherwise */
-			elog(ERROR, "%s", PQerrorMessage(connection));
-			PQclear(res);
-			exit(1);
+			/* Return the error message otherwise */
+			if (errbuf)
+				snprintf(errbuf, errsize, "%s", PQerrorMessage(connection));
 		}
+		ret = false;
+		goto cleanup;
 	}
 
 	num = PQntuples(res);

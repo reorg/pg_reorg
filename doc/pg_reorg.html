@@ -206,11 +206,11 @@ The following list shows the cause of errors.</p>
 To cleanup, execute $PGHOME/share/contrib/uninstall_pg_reorg.sql to the database where the error occured and then execute $PGHOME/share/contrib/pg_reorg.sql. (Do uninstall and reinstall.)</p>
 
 <dl>
-<dt>pg_reorg : reorg database "template1" ... skipped</dt>
+<dt>pg_reorg: reorg database "template1" ... skipped: pg_reorg is not installed in the database</dt>
 <dd>pg_reorg is not installed in the database when --all option is specified.</dd>
 <dd>Do register pg_reorg to the database.</dd>
 
-<dt>ERROR: pg_reorg is not installed</dt>
+<dt>ERROR: pg_reorg is not installed in the database</dt>
 <dd>pg_reorg is not installed in the database specified by --dbname.</dd>
 <dd>Do register pg_reorg to the database.</dd>
 

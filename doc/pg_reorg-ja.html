@@ -216,11 +216,11 @@ DEBUG, INFO, NOTICE, WARNING, ERROR, LOG, FATAL, PANIC から選択します。
 クリーンアップは、エラーが発生したデータベースに対して、$PGHOME/share/contrib/uninstall_pg_reorg.sql を実行し、その後、$PGHOME/share/contrib/pg_reorg.sql を実行します。</p>
 
 <dl>
-<dt>pg_reorg : reorg database "template1" ... skipped</dt>
+<dt>pg_reorg: reorg database "template1" ... skipped: pg_reorg is not installed in the database</dt>
 <dd>--allオプションを指定した際に、pg_reorg がインストールされていないデータベースに対して表示されます。</dd>
 <dd>pg_reorg スキーマのインストールを行ってください。</dd>
 
-<dt>ERROR: pg_reorg is not installed</dt>
+<dt>ERROR: pg_reorg is not installed in the database</dt>
 <dd>--dbnameで指定したデータベースにpg_reorg がインストールされていません。</dd>
 <dd>pg_reorg のインストールを行ってください。</dd>
 
